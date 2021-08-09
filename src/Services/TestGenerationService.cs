@@ -15,8 +15,8 @@ using UnitTestBoilerplate.Utilities;
 namespace UnitTestBoilerplate.Services
 {
 	[Export(typeof(ITestGenerationService))]
-    public class TestGenerationService : ITestGenerationService
-    {
+	public class TestGenerationService : ITestGenerationService
+	{
 		private static readonly HashSet<string> PropertyInjectionAttributeNames = new HashSet<string>
 		{
 			"Microsoft.Practices.Unity.DependencyAttribute",
@@ -39,7 +39,7 @@ namespace UnitTestBoilerplate.Services
 
 		public async Task<string> GenerateUnitTestFileAsync(
 			ProjectItemSummary selectedFile,
-			EnvDTE.Project targetProject, 
+			EnvDTE.Project targetProject,
 			TestFramework testFramework,
 			MockFramework mockFramework)
 		{
@@ -85,7 +85,7 @@ namespace UnitTestBoilerplate.Services
 				Directory.CreateDirectory(testFolder);
 			}
 
-			File.WriteAllText(testPath, unitTestContents, new UTF8Encoding(true));
+			File.WriteAllText(testPath, unitTestContents);
 
 			return testPath;
 		}
@@ -144,8 +144,8 @@ namespace UnitTestBoilerplate.Services
 		}
 
 		private async Task<TestGenerationContext> CollectTestGenerationContextAsync(
-			ProjectItemSummary selectedFile, 
-			string targetProjectNamespace, 
+			ProjectItemSummary selectedFile,
+			string targetProjectNamespace,
 			TestFramework testFramework,
 			MockFramework mockFramework,
 			IBoilerplateSettings settings)
@@ -169,10 +169,10 @@ namespace UnitTestBoilerplate.Services
 				throw new InvalidOperationException("Could not find class or struct declaration.");
 			}
 
-			if (firstClassDeclaration.ChildTokens().Any(node => node.Kind() == SyntaxKind.AbstractKeyword))
-			{
-				throw new InvalidOperationException("Cannot unit test an abstract class.");
-			}
+
+
+
+
 
 			SyntaxToken classIdentifierToken = firstClassDeclaration.ChildTokens().FirstOrDefault(n => n.Kind() == SyntaxKind.IdentifierToken);
 			if (classIdentifierToken == default(SyntaxToken))
@@ -231,7 +231,8 @@ namespace UnitTestBoilerplate.Services
 			foreach (MethodDeclarationSyntax methodDeclaration in
 				firstClassDeclaration.ChildNodes().Where(
 					n => n.Kind() == SyntaxKind.MethodDeclaration
-					&& ((MethodDeclarationSyntax)n).Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword))))
+					&& ((MethodDeclarationSyntax)n).Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword) || m.IsKind(SyntaxKind.ProtectedKeyword))
+					&& ((MethodDeclarationSyntax)n).Modifiers.All(m => !m.IsKind(SyntaxKind.AbstractKeyword))))
 			{
 				var parameterList = GetParameterListNodes(methodDeclaration).ToList();
 
@@ -242,8 +243,12 @@ namespace UnitTestBoilerplate.Services
 					DoesReturnTask(methodDeclaration);
 
 				var hasReturnType = !DoesReturnNonGenericTask(methodDeclaration) && !DoesReturnVoid(methodDeclaration);
+				//var methodReturnType = GetMethodReturnType(methodDeclaration, semanticModel);
 
-				methodDeclarations.Add(new MethodDescriptor(methodDeclaration.Identifier.Text, parameterTypes, isAsync, hasReturnType));
+				SymbolInfo symbolInfo = semanticModel.GetSymbolInfo(methodDeclaration.ReturnType);
+				var methodReturnType = new TypeDescriptor(symbolInfo, methodDeclaration.ReturnType, methodDeclaration.ReturnType.Kind());
+
+				methodDeclarations.Add(new MethodDescriptor(methodDeclaration.Identifier.Text, parameterTypes, isAsync, hasReturnType, methodReturnType));
 			}
 
 			string unitTestNamespace;
@@ -318,6 +323,12 @@ namespace UnitTestBoilerplate.Services
 			}
 
 			return argumentDescriptors;
+		}
+
+		private static TypeDescriptor GetMethodReturnType(MethodDeclarationSyntax methodDeclaration, SemanticModel semanticModel)
+		{
+			SymbolInfo symbolInfo = semanticModel.GetSymbolInfo(methodDeclaration.ReturnType);
+			return new TypeDescriptor(symbolInfo, methodDeclaration.ReturnType, methodDeclaration.ReturnType.Kind());
 		}
 
 		private static SyntaxNode GetMainNodeFromParameterEntry(ParameterSyntax parameter)
@@ -585,6 +596,10 @@ namespace UnitTestBoilerplate.Services
 					WriteParameterSetupDefaults(builder, context, methodDescriptor);
 					break;
 
+				case "InitializeParameters":
+					WriteInitializeParameters(builder, context, methodDescriptor);
+					break;
+
 				case "ParameterSetupTodo":
 					for (int j = 0; j < numberOfParameters; j++)
 					{
@@ -601,7 +616,7 @@ namespace UnitTestBoilerplate.Services
 				case "MethodInvocationPrefix":
 					if (methodDescriptor.HasReturnType)
 					{
-						builder.Append("var result = ");
+						builder.Append("_result = ");
 					}
 
 					if (methodDescriptor.IsAsync)
@@ -685,12 +700,47 @@ namespace UnitTestBoilerplate.Services
 					argumentValue = "TODO";
 				}
 
-				builder.Append($"{typeInformation} {methodDescriptor.MethodParameters[j].ArgumentName} = {argumentValue};");
+				builder.Append($"private {typeInformation} _{methodDescriptor.MethodParameters[j].ArgumentName};");
 				if (j < numberOfParameters - 1)
 				{
 					builder.AppendLine();
 				}
 			}
+
+			if (methodDescriptor.HasReturnType)
+			{
+				builder.AppendLine();
+				var type = methodDescriptor.IsAsync ? methodDescriptor.MethodReturnType.TaskType : methodDescriptor.MethodReturnType.ToString();
+				builder.Append($"private {type} _result;");
+			}
+		}
+
+		private static void WriteInitializeParameters(StringBuilder builder, TestGenerationContext context, MethodDescriptor methodDescriptor)
+		{
+			int numberOfParameters = methodDescriptor.MethodParameters.Count();
+			for (int j = 0; j < numberOfParameters; j++)
+			{
+				TypeDescriptor typeInformation = methodDescriptor.MethodParameters[j].TypeInformation;
+
+				string argumentValue;
+				if (typeInformation.TypeSymbol != null)
+				{
+					// If we have proper type information, generate the default expression for this type
+					var generator = Microsoft.CodeAnalysis.Editing.SyntaxGenerator.GetGenerator(context.Document);
+					argumentValue = generator.DefaultExpression(typeInformation.TypeSymbol).ToString();
+				}
+				else
+				{
+					argumentValue = "TODO";
+				}
+
+				builder.Append($"_{methodDescriptor.MethodParameters[j].ArgumentName} = {argumentValue};");
+				if (j < numberOfParameters - 1)
+				{
+					builder.AppendLine();
+				}
+			}
+
 		}
 
 		private static void WriteMethodInvocation(StringBuilder builder, MethodDescriptor methodDescriptor, string currentIndent)
@@ -704,7 +754,7 @@ namespace UnitTestBoilerplate.Services
 			}
 			else
 			{
-				builder.AppendLine();
+
 
 				for (int j = 0; j < numberOfParameters; j++)
 				{
@@ -721,11 +771,11 @@ namespace UnitTestBoilerplate.Services
 						default:
 							break;
 					}
-					builder.Append($"{methodDescriptor.MethodParameters[j].ArgumentName}");
+					builder.Append($"_{methodDescriptor.MethodParameters[j].ArgumentName}");
 
 					if (j < numberOfParameters - 1)
 					{
-						builder.AppendLine(",");
+						builder.Append(",");
 					}
 					else
 					{
@@ -866,7 +916,7 @@ namespace UnitTestBoilerplate.Services
 
 			if (context.ConstructorTypes.Count > 0)
 			{
-				builder.AppendLine("(");
+				builder.Append("(");
 
 				for (int i = 0; i < context.ConstructorTypes.Count; i++)
 				{
@@ -885,7 +935,7 @@ namespace UnitTestBoilerplate.Services
 
 					if (i < context.ConstructorTypes.Count - 1)
 					{
-						builder.AppendLine(",");
+						builder.Append(",");
 					}
 				}
 
@@ -1068,8 +1118,8 @@ namespace UnitTestBoilerplate.Services
 		{
 			// Group them by TypeBaseName to see which ones need a more unique name
 			var results = from t in injectedTypes
-				group t by t.TypeBaseName into g
-				select new { TypeBaseName = g.Key, Types = g.ToList() };
+						  group t by t.TypeBaseName into g
+						  select new { TypeBaseName = g.Key, Types = g.ToList() };
 
 			foreach (var result in results)
 			{
